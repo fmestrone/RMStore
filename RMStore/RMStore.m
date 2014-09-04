@@ -21,9 +21,15 @@
 #import "RMStore.h"
 
 NSString *const RMStoreErrorDomain = @"net.robotmedia.store";
+NSInteger const RMStoreErrorCodeDownloadCanceled = 300;
 NSInteger const RMStoreErrorCodeUnknownProductIdentifier = 100;
 NSInteger const RMStoreErrorCodeUnableToCompleteVerification = 200;
 
+NSString* const RMSKDownloadCanceled = @"RMSKDownloadCanceled";
+NSString* const RMSKDownloadFailed = @"RMSKDownloadFailed";
+NSString* const RMSKDownloadFinished = @"RMSKDownloadFinished";
+NSString* const RMSKDownloadPaused = @"RMSKDownloadPaused";
+NSString* const RMSKDownloadUpdated = @"RMSKDownloadUpdated";
 NSString* const RMSKPaymentTransactionFailed = @"RMSKPaymentTransactionFailed";
 NSString* const RMSKPaymentTransactionFinished = @"RMSKPaymentTransactionFinished";
 NSString* const RMSKProductsRequestFailed = @"RMSKProductsRequestFailed";
@@ -32,19 +38,17 @@ NSString* const RMSKRefreshReceiptFailed = @"RMSKRefreshReceiptFailed";
 NSString* const RMSKRefreshReceiptFinished = @"RMSKRefreshReceiptFinished";
 NSString* const RMSKRestoreTransactionsFailed = @"RMSKRestoreTransactionsFailed";
 NSString* const RMSKRestoreTransactionsFinished = @"RMSKRestoreTransactionsFinished";
-NSString* const RMSKDownloadFailed = @"RMSKDownloadFailed";
-NSString* const RMSKDownloadFinished = @"RMSKDownloadFinished";
-NSString* const RMSKDownloadUpdate = @"RMSKDownloadUpdate";
 
 NSString* const RMStoreNotificationInvalidProductIdentifiers = @"invalidProductIdentifiers";
+NSString* const RMStoreNotificationDownloadProgress = @"downloadProgress";
 NSString* const RMStoreNotificationProductIdentifier = @"productIdentifier";
 NSString* const RMStoreNotificationProducts = @"products";
+NSString* const RMStoreNotificationStoreDownload = @"storeDownload";
 NSString* const RMStoreNotificationStoreError = @"storeError";
 NSString* const RMStoreNotificationStoreReceipt = @"storeReceipt";
 NSString* const RMStoreNotificationTransaction = @"transaction";
-NSString* const RMStoreNotificationStoreDownload = @"storeDownload";
 
-#ifdef DEBUG
+#if DEBUG
 #define RMStoreLog(...) NSLog(@"RMStore: %@", [NSString stringWithFormat:__VA_ARGS__]);
 #else
 #define RMStoreLog(...)
@@ -59,34 +63,39 @@ typedef void (^RMStoreSuccessBlock)();
 
 @implementation NSNotification(RMStore)
 
-- (NSArray*)invalidProductIdentifiers
+- (float)rm_downloadProgress
 {
-    return [self.userInfo objectForKey:RMStoreNotificationInvalidProductIdentifiers];
+    return [self.userInfo[RMStoreNotificationDownloadProgress] floatValue];
 }
 
-- (NSString*)productIdentifier
+- (NSArray*)rm_invalidProductIdentifiers
 {
-    return [self.userInfo objectForKey:RMStoreNotificationProductIdentifier];
+    return (self.userInfo)[RMStoreNotificationInvalidProductIdentifiers];
 }
 
-- (NSArray*)products
+- (NSString*)rm_productIdentifier
 {
-    return [self.userInfo objectForKey:RMStoreNotificationProducts];
+    return (self.userInfo)[RMStoreNotificationProductIdentifier];
 }
 
-- (NSError*)storeError
+- (NSArray*)rm_products
 {
-    return [self.userInfo objectForKey:RMStoreNotificationStoreError];
+    return (self.userInfo)[RMStoreNotificationProducts];
 }
 
-- (SKPaymentTransaction*)transaction
+- (SKDownload*)rm_storeDownload
 {
-    return [self.userInfo objectForKey:RMStoreNotificationTransaction];
+    return (self.userInfo)[RMStoreNotificationStoreDownload];
 }
 
-- (SKDownload*)storeDownload
+- (NSError*)rm_storeError
 {
-    return [self.userInfo objectForKey:RMStoreNotificationStoreDownload];
+    return (self.userInfo)[RMStoreNotificationStoreError];
+}
+
+- (SKPaymentTransaction*)rm_transaction
+{
+    return (self.userInfo)[RMStoreNotificationTransaction];
 }
 
 @end
@@ -120,7 +129,6 @@ typedef void (^RMStoreSuccessBlock)();
     NSMutableSet *_productsRequestDelegates;
     
     NSInteger _pendingRestoredTransactionsCount;
-    NSMutableSet *_pendingRestoredTransactionsDownloadingContent; // HACK: We track downloading content transactions because non-consumable products with downloadable content are some times restored twice when calling restoreCompletedTransactions
     BOOL _restoredCompletedTransactionsFinished;
     
     SKReceiptRefreshRequest *_refreshReceiptRequest;
@@ -138,7 +146,6 @@ typedef void (^RMStoreSuccessBlock)();
         _addPaymentParameters = [NSMutableDictionary dictionary];
         _products = [NSMutableDictionary dictionary];
         _productsRequestDelegates = [NSMutableSet set];
-        _pendingRestoredTransactionsDownloadingContent = [NSMutableSet set];
         [[SKPaymentQueue defaultQueue] addTransactionObserver:self];
     }
     return self;
@@ -189,7 +196,7 @@ typedef void (^RMStoreSuccessBlock)();
         RMStoreLog(@"unknown product id %@", productIdentifier)
         if (failureBlock != nil)
         {
-            NSError *error = [NSError errorWithDomain:RMStoreErrorDomain code:RMStoreErrorCodeUnknownProductIdentifier userInfo:@{NSLocalizedDescriptionKey: NSLocalizedString(@"Unknown product identifier", "Error description")}];
+            NSError *error = [NSError errorWithDomain:RMStoreErrorDomain code:RMStoreErrorCodeUnknownProductIdentifier userInfo:@{NSLocalizedDescriptionKey: NSLocalizedStringFromTable(@"Unknown product identifier", @"RMStore", @"Error description")}];
             failureBlock(nil, error);
         }
         return;
@@ -203,7 +210,7 @@ typedef void (^RMStoreSuccessBlock)();
     RMAddPaymentParameters *parameters = [[RMAddPaymentParameters alloc] init];
     parameters.successBlock = successBlock;
     parameters.failureBlock = failureBlock;
-    [_addPaymentParameters setObject:parameters forKey:productIdentifier];
+    _addPaymentParameters[productIdentifier] = parameters;
     
     [[SKPaymentQueue defaultQueue] addPayment:payment];
 }
@@ -285,7 +292,7 @@ typedef void (^RMStoreSuccessBlock)();
 
 - (SKProduct*)productForIdentifier:(NSString*)productIdentifier
 {
-    return [_products objectForKey:productIdentifier];
+    return _products[productIdentifier];
 }
 
 + (NSString*)localizedPriceOfProduct:(SKProduct*)product
@@ -301,6 +308,11 @@ typedef void (^RMStoreSuccessBlock)();
 
 - (void)addStoreObserver:(id<RMStoreObserver>)observer
 {
+    [self addStoreObserver:observer selector:@selector(storeDownloadCanceled:) notificationName:RMSKDownloadCanceled];
+    [self addStoreObserver:observer selector:@selector(storeDownloadFailed:) notificationName:RMSKDownloadFailed];
+    [self addStoreObserver:observer selector:@selector(storeDownloadFinished:) notificationName:RMSKDownloadFinished];
+    [self addStoreObserver:observer selector:@selector(storeDownloadPaused:) notificationName:RMSKDownloadPaused];
+    [self addStoreObserver:observer selector:@selector(storeDownloadUpdated:) notificationName:RMSKDownloadUpdated];
     [self addStoreObserver:observer selector:@selector(storeProductsRequestFailed:) notificationName:RMSKProductsRequestFailed];
     [self addStoreObserver:observer selector:@selector(storeProductsRequestFinished:) notificationName:RMSKProductsRequestFinished];
     [self addStoreObserver:observer selector:@selector(storePaymentTransactionFailed:) notificationName:RMSKPaymentTransactionFailed];
@@ -309,13 +321,15 @@ typedef void (^RMStoreSuccessBlock)();
     [self addStoreObserver:observer selector:@selector(storeRefreshReceiptFinished:) notificationName:RMSKRefreshReceiptFinished];
     [self addStoreObserver:observer selector:@selector(storeRestoreTransactionsFailed:) notificationName:RMSKRestoreTransactionsFailed];
     [self addStoreObserver:observer selector:@selector(storeRestoreTransactionsFinished:) notificationName:RMSKRestoreTransactionsFinished];
-    [self addStoreObserver:observer selector:@selector(storeDownloadFailed:) notificationName:RMSKDownloadFailed];
-    [self addStoreObserver:observer selector:@selector(storeDownloadFinished:) notificationName:RMSKDownloadFinished];
-    [self addStoreObserver:observer selector:@selector(storeDownloadUpdate:) notificationName:RMSKDownloadUpdate];
 }
 
 - (void)removeStoreObserver:(id<RMStoreObserver>)observer
 {
+    [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKDownloadCanceled object:self];
+    [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKDownloadFailed object:self];
+    [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKDownloadFinished object:self];
+    [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKDownloadPaused object:self];
+    [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKDownloadUpdated object:self];
     [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKProductsRequestFailed object:self];
     [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKProductsRequestFinished object:self];
     [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKPaymentTransactionFailed object:self];
@@ -324,9 +338,6 @@ typedef void (^RMStoreSuccessBlock)();
     [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKRefreshReceiptFinished object:self];
     [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKRestoreTransactionsFailed object:self];
     [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKRestoreTransactionsFinished object:self];
-    [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKDownloadFailed object:self];
-    [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKDownloadFinished object:self];
-    [[NSNotificationCenter defaultCenter] removeObserver:observer name:RMSKDownloadUpdate object:self];
 }
 
 // Private
@@ -348,13 +359,13 @@ typedef void (^RMStoreSuccessBlock)();
         switch (transaction.transactionState)
         {
             case SKPaymentTransactionStatePurchased:
-                [self paymentQueue:queue completedTransaction:transaction];
+                [self didPurchaseTransaction:transaction queue:queue];
                 break;
             case SKPaymentTransactionStateFailed:
-                [self paymentQueue:queue failedTransaction:transaction error:transaction.error];
+                [self didFailTransaction:transaction queue:queue error:transaction.error];
                 break;
             case SKPaymentTransactionStateRestored:
-                [self paymentQueue:queue restoredTransaction:transaction];
+                [self didRestoreTransaction:transaction queue:queue];
             default:
                 break;
         }
@@ -391,77 +402,212 @@ typedef void (^RMStoreSuccessBlock)();
     {
         switch (download.downloadState)
         {
-            case SKDownloadStateFinished:
-                [self paymentQueue:queue completedDownload:download];
-                break;
             case SKDownloadStateActive:
-                [self paymentQueue:queue activeDownload:download];
+                [self didUpdateDownload:download queue:queue];
                 break;
             case SKDownloadStateCancelled:
+                [self didCancelDownload:download queue:queue];
+                break;
             case SKDownloadStateFailed:
-                [self paymentQueue:queue failedDownload:download error:download.error];
-            default:
+                [self didFailDownload:download queue:queue];
+                break;
+            case SKDownloadStateFinished:
+                [self didFinishDownload:download queue:queue];
+                break;
+            case SKDownloadStatePaused:
+                [self didPauseDownload:download queue:queue];
+                break;
+            case SKDownloadStateWaiting:
+                // Do nothing
                 break;
         }
     }
 }
 
-- (void)paymentQueue:(SKPaymentQueue*)queue completedDownload:(SKDownload *)download
-{
-    RMStoreLog(@"download for product %@ finished", download.transaction.payment.productIdentifier);
-    [_pendingRestoredTransactionsDownloadingContent removeObject:download.transaction.transactionIdentifier];
-    NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
-    [userInfo setObject:download forKey:RMStoreNotificationStoreDownload];
-    [userInfo setObject:download.transaction.payment.productIdentifier forKey:RMStoreNotificationProductIdentifier];
-    [[NSNotificationCenter defaultCenter] postNotificationName:RMSKDownloadUpdate object:self userInfo:userInfo]; // To monitor progress = 1.0
-    [[NSNotificationCenter defaultCenter] postNotificationName:RMSKDownloadFinished object:self userInfo:userInfo];
-    
-    [self paymentQueue:queue finishedTransaction:download.transaction];
-    [self notifyRestoreTransactionFinishedIfApplicableAfterTransaction:download.transaction];
-}
+#pragma mark Download State
 
-- (void)paymentQueue:(SKPaymentQueue*)queue activeDownload:(SKDownload *)download
+- (void)didCancelDownload:(SKDownload*)download queue:(SKPaymentQueue*)queue
 {
-    NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
-    [userInfo setObject:download forKey:RMStoreNotificationStoreDownload];
-    [userInfo setObject:download.transaction.payment.productIdentifier forKey:RMStoreNotificationProductIdentifier];
-    [[NSNotificationCenter defaultCenter] postNotificationName:RMSKDownloadUpdate object:self userInfo:userInfo];
-}
+    SKPaymentTransaction *transaction = download.transaction;
+    RMStoreLog(@"download %@ for product %@ canceled", download.contentIdentifier, download.transaction.payment.productIdentifier);
 
-- (void)paymentQueue:(SKPaymentQueue*)queue failedDownload:(SKDownload *)download error:(NSError *)error
-{
-    RMStoreLog(@"download for product %@ failed with error %@", download.transaction.payment.productIdentifier, download.error.debugDescription);
-    [_pendingRestoredTransactionsDownloadingContent removeObject:download.transaction.transactionIdentifier];
-    NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
-    [userInfo setObject:download forKey:RMStoreNotificationStoreDownload];
-    [userInfo setObject:download.transaction.payment.productIdentifier forKey:RMStoreNotificationProductIdentifier];
-    if (download.error)
+    [self postNotificationWithName:RMSKDownloadCanceled download:download userInfoExtras:nil];
+
+    NSError *error = [NSError errorWithDomain:RMStoreErrorDomain code:RMStoreErrorCodeDownloadCanceled userInfo:@{NSLocalizedDescriptionKey: NSLocalizedStringFromTable(@"Download canceled", @"RMStore", @"Error description")}];
+
+    const BOOL hasPendingDownloads = [self.class hasPendingDownloadsInTransaction:transaction];
+    if (!hasPendingDownloads)
     {
-        [userInfo setObject:download.error forKey:RMStoreNotificationStoreError];
+        [self didFailTransaction:transaction queue:queue error:error];
     }
-    [[NSNotificationCenter defaultCenter] postNotificationName:RMSKDownloadFailed object:self userInfo:userInfo];
 }
 
-- (void)paymentQueue:(SKPaymentQueue*)queue completedTransaction:(SKPaymentTransaction *)transaction
+- (void)didFailDownload:(SKDownload*)download queue:(SKPaymentQueue*)queue
+{
+    NSError *error = download.error;
+    SKPaymentTransaction *transaction = download.transaction;
+    RMStoreLog(@"download %@ for product %@ failed with error %@", download.contentIdentifier, transaction.payment.productIdentifier, error.debugDescription);
+
+    NSDictionary *extras = error ? @{RMStoreNotificationStoreError : error} : nil;
+    [self postNotificationWithName:RMSKDownloadFailed download:download userInfoExtras:extras];
+
+    const BOOL hasPendingDownloads = [self.class hasPendingDownloadsInTransaction:transaction];
+    if (!hasPendingDownloads)
+    {
+        [self didFailTransaction:transaction queue:queue error:error];
+    }
+}
+
+- (void)didFinishDownload:(SKDownload*)download queue:(SKPaymentQueue*)queue
+{
+    SKPaymentTransaction *transaction = download.transaction;
+    RMStoreLog(@"download %@ for product %@ finished", download.contentIdentifier, transaction.payment.productIdentifier);
+    
+    [self postNotificationWithName:RMSKDownloadFinished download:download userInfoExtras:nil];
+
+    const BOOL hasPendingDownloads = [self.class hasPendingDownloadsInTransaction:transaction];
+    if (!hasPendingDownloads)
+    {
+        [self finishTransaction:download.transaction queue:queue];
+    }
+}
+
+- (void)didPauseDownload:(SKDownload*)download queue:(SKPaymentQueue*)queue
+{
+    RMStoreLog(@"download %@ for product %@ paused", download.contentIdentifier, download.transaction.payment.productIdentifier);
+    [self postNotificationWithName:RMSKDownloadPaused download:download userInfoExtras:nil];
+}
+
+- (void)didUpdateDownload:(SKDownload*)download queue:(SKPaymentQueue*)queue
+{
+    RMStoreLog(@"download %@ for product %@ updated", download.contentIdentifier, download.transaction.payment.productIdentifier);
+    NSDictionary *extras = @{RMStoreNotificationDownloadProgress : @(download.progress)};
+    [self postNotificationWithName:RMSKDownloadUpdated download:download userInfoExtras:extras];
+}
+
++ (BOOL)hasPendingDownloadsInTransaction:(SKPaymentTransaction*)transaction
+{
+    for (SKDownload *download in transaction.downloads)
+    {
+        switch (download.downloadState)
+        {
+            case SKDownloadStateActive:
+            case SKDownloadStatePaused:
+            case SKDownloadStateWaiting:
+                return YES;
+            case SKDownloadStateCancelled:
+            case SKDownloadStateFailed:
+            case SKDownloadStateFinished:
+                continue;
+        }
+    }
+    return NO;
+}
+
+#pragma mark Transaction State
+
+- (void)didPurchaseTransaction:(SKPaymentTransaction *)transaction queue:(SKPaymentQueue*)queue
 {
     RMStoreLog(@"transaction purchased with product %@", transaction.payment.productIdentifier);
     
     if (self.receiptVerificator != nil)
     {
         [self.receiptVerificator verifyTransaction:transaction success:^{
-            [self paymentQueue:queue verifiedTransaction:transaction];
+            [self didVerifyTransaction:transaction queue:queue];
         } failure:^(NSError *error) {
-            [self paymentQueue:queue failedTransaction:transaction error:error];
+            [self didFailTransaction:transaction queue:queue error:error];
         }];
     }
     else
     {
         RMStoreLog(@"WARNING: no receipt verification");
-        [self paymentQueue:queue verifiedTransaction:transaction];
+        [self didVerifyTransaction:transaction queue:queue];
     }
 }
 
-- (void)paymentQueue:(SKPaymentQueue*)queue finishedTransaction:(SKPaymentTransaction *)transaction
+- (void)didFailTransaction:(SKPaymentTransaction *)transaction queue:(SKPaymentQueue*)queue error:(NSError*)error
+{
+    SKPayment *payment = transaction.payment;
+	NSString* productIdentifier = payment.productIdentifier;
+    RMStoreLog(@"transaction failed with product %@ and error %@", productIdentifier, error.debugDescription);
+    
+    if (error.code != RMStoreErrorCodeUnableToCompleteVerification)
+    { // If we were unable to complete the verification we want StoreKit to keep reminding us of the transaction
+        [queue finishTransaction:transaction];
+    }
+    
+    RMAddPaymentParameters *parameters = [self popAddPaymentParametersForIdentifier:productIdentifier];
+    if (parameters.failureBlock != nil)
+    {
+        parameters.failureBlock(transaction, error);
+    }
+    
+    NSDictionary *extras = error ? @{RMStoreNotificationStoreError : error} : nil;
+    [self postNotificationWithName:RMSKPaymentTransactionFailed transaction:transaction userInfoExtras:extras];
+    
+    if (transaction.transactionState == SKPaymentTransactionStateRestored)
+    {
+        [self notifyRestoreTransactionFinishedIfApplicableAfterTransaction:transaction];
+    }
+}
+
+- (void)didRestoreTransaction:(SKPaymentTransaction *)transaction queue:(SKPaymentQueue*)queue
+{
+    RMStoreLog(@"transaction restored with product %@", transaction.originalTransaction.payment.productIdentifier);
+    
+    _pendingRestoredTransactionsCount++;
+    if (self.receiptVerificator != nil)
+    {
+        [self.receiptVerificator verifyTransaction:transaction success:^{
+            [self didVerifyTransaction:transaction queue:queue];
+        } failure:^(NSError *error) {
+            [self didFailTransaction:transaction queue:queue error:error];
+        }];
+    }
+    else
+    {
+        RMStoreLog(@"WARNING: no receipt verification");
+        [self didVerifyTransaction:transaction queue:queue];
+    }
+}
+
+- (void)didVerifyTransaction:(SKPaymentTransaction *)transaction queue:(SKPaymentQueue*)queue
+{
+    if (self.contentDownloader != nil)
+    {
+        [self.contentDownloader downloadContentForTransaction:transaction success:^{
+            [self postNotificationWithName:RMSKDownloadFinished transaction:transaction userInfoExtras:nil];
+            [self didDownloadSelfHostedContentForTransaction:transaction queue:queue];
+        } progress:^(float progress) {
+            NSDictionary *extras = @{RMStoreNotificationDownloadProgress : @(progress)};
+            [self postNotificationWithName:RMSKDownloadUpdated transaction:transaction userInfoExtras:extras];
+        } failure:^(NSError *error) {
+            NSDictionary *extras = error ? @{RMStoreNotificationStoreError : error} : nil;
+            [self postNotificationWithName:RMSKDownloadFailed transaction:transaction userInfoExtras:extras];
+            [self didFailTransaction:transaction queue:queue error:error];
+        }];
+    }
+    else
+    {
+        [self didDownloadSelfHostedContentForTransaction:transaction queue:queue];
+    }
+}
+
+- (void)didDownloadSelfHostedContentForTransaction:(SKPaymentTransaction *)transaction queue:(SKPaymentQueue*)queue
+{
+    NSArray *downloads = [transaction respondsToSelector:@selector(downloads)] ? transaction.downloads : @[];
+    if (downloads.count > 0)
+    {
+        RMStoreLog(@"starting downloads for product %@ started", transaction.payment.productIdentifier);
+        [queue startDownloads:downloads];
+    }
+    else
+    {
+        [self finishTransaction:transaction queue:queue];
+    }
+}
+
+- (void)finishTransaction:(SKPaymentTransaction *)transaction queue:(SKPaymentQueue*)queue
 {
     SKPayment *payment = transaction.payment;
 	NSString* productIdentifier = payment.productIdentifier;
@@ -474,86 +620,19 @@ typedef void (^RMStoreSuccessBlock)();
         wrapper.successBlock(transaction);
     }
     
-    NSDictionary *userInfo = @{RMStoreNotificationTransaction: transaction, RMStoreNotificationProductIdentifier: productIdentifier};
-    [[NSNotificationCenter defaultCenter] postNotificationName:RMSKPaymentTransactionFinished object:self userInfo:userInfo];
-}
-
-- (void)paymentQueue:(SKPaymentQueue*)queue verifiedTransaction:(SKPaymentTransaction *)transaction
-{
-    if (transaction.downloads)
-    {
-        RMStoreLog(@"download for product %@ started", transaction.payment.productIdentifier);
-        [_pendingRestoredTransactionsDownloadingContent addObject:transaction.transactionIdentifier];
-        [queue startDownloads:transaction.downloads];
-    }
-    else
-    {
-        [self paymentQueue:queue finishedTransaction:transaction];
-    }
-}
-
-- (void)paymentQueue:(SKPaymentQueue *)queue failedTransaction:(SKPaymentTransaction *)transaction error:(NSError*)error
-{
-    SKPayment *payment = transaction.payment;
-	NSString* productIdentifier = payment.productIdentifier;
-    RMStoreLog(@"transaction failed with product %@ and error %@", productIdentifier, error.debugDescription);
+    [self postNotificationWithName:RMSKPaymentTransactionFinished transaction:transaction userInfoExtras:nil];
     
-    if (error.code != RMStoreErrorCodeUnableToCompleteVerification)
-    { // If we were unable to complete the verification we want StoreKit to keep reminding us of the transaction
-        [queue finishTransaction:transaction];
-    }
-
-    RMAddPaymentParameters *parameters = [self popAddPaymentParametersForIdentifier:productIdentifier];
-    if (parameters.failureBlock != nil)
+    if (transaction.transactionState == SKPaymentTransactionStateRestored)
     {
-        parameters.failureBlock(transaction, error);
-    }
-    
-    NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
-    [userInfo setObject:transaction forKey:RMStoreNotificationTransaction];
-    [userInfo setObject:productIdentifier forKey:RMStoreNotificationProductIdentifier];
-    if (error)
-    {
-        [userInfo setObject:error forKey:RMStoreNotificationStoreError];
-    }
-    
-    [[NSNotificationCenter defaultCenter] postNotificationName:RMSKPaymentTransactionFailed object:self userInfo:userInfo];
-}
-
-- (void)paymentQueue:(SKPaymentQueue*)queue restoredTransaction:(SKPaymentTransaction *)transaction
-{
-    RMStoreLog(@"transaction restored with product %@", transaction.originalTransaction.payment.productIdentifier);
-    
-    if (![_pendingRestoredTransactionsDownloadingContent containsObject:transaction.transactionIdentifier])
-    {
-        _pendingRestoredTransactionsCount++;
-    }
-    if (self.receiptVerificator != nil)
-    {
-        [self.receiptVerificator verifyTransaction:transaction success:^{
-            [self paymentQueue:queue verifiedTransaction:transaction];
-            [self notifyRestoreTransactionFinishedIfApplicableAfterTransaction:transaction];
-        } failure:^(NSError *error) {
-            [self paymentQueue:queue failedTransaction:transaction error:error];
-            [self notifyRestoreTransactionFinishedIfApplicableAfterTransaction:transaction];
-        }];
-    }
-    else
-    {
-        RMStoreLog(@"WARNING: no receipt verification");
-        [self paymentQueue:queue verifiedTransaction:transaction];
         [self notifyRestoreTransactionFinishedIfApplicableAfterTransaction:transaction];
     }
 }
 
 - (void)notifyRestoreTransactionFinishedIfApplicableAfterTransaction:(SKPaymentTransaction*)transaction
 {
-    if (transaction != nil && transaction.transactionState == SKPaymentTransactionStateRestored)
+    if (transaction != nil)
     {
-        if (![_pendingRestoredTransactionsDownloadingContent containsObject:transaction.transactionIdentifier])
-        { // Wait until the transaction's downloadable content is downloaded
-            _pendingRestoredTransactionsCount--;
-        }
+        _pendingRestoredTransactionsCount--;
     }
     if (_restoredCompletedTransactionsFinished && _pendingRestoredTransactionsCount == 0)
     { // Wait until all restored transations have been verified
@@ -568,7 +647,7 @@ typedef void (^RMStoreSuccessBlock)();
 
 - (RMAddPaymentParameters*)popAddPaymentParametersForIdentifier:(NSString*)identifier
 {
-    RMAddPaymentParameters *parameters = [_addPaymentParameters objectForKey:identifier];
+    RMAddPaymentParameters *parameters = _addPaymentParameters[identifier];
     [_addPaymentParameters removeObjectForKey:identifier];
     return parameters;
 }
@@ -608,7 +687,27 @@ typedef void (^RMStoreSuccessBlock)();
 
 - (void)addProduct:(SKProduct*)product
 {
-    [_products setObject:product forKey:product.productIdentifier];    
+    _products[product.productIdentifier] = product;    
+}
+
+- (void)postNotificationWithName:(NSString*)notificationName download:(SKDownload*)download userInfoExtras:(NSDictionary*)extras
+{
+    NSMutableDictionary *mutableExtras = extras ? [NSMutableDictionary dictionaryWithDictionary:extras] : [NSMutableDictionary dictionary];
+    mutableExtras[RMStoreNotificationStoreDownload] = download;
+    [self postNotificationWithName:notificationName transaction:download.transaction userInfoExtras:mutableExtras];
+}
+
+- (void)postNotificationWithName:(NSString*)notificationName transaction:(SKPaymentTransaction*)transaction userInfoExtras:(NSDictionary*)extras
+{
+    NSString *productIdentifier = transaction.payment.productIdentifier;
+    NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
+    userInfo[RMStoreNotificationTransaction] = transaction;
+    userInfo[RMStoreNotificationProductIdentifier] = productIdentifier;
+    if (extras)
+    {
+        [userInfo addEntriesFromDictionary:extras];
+    }
+    [[NSNotificationCenter defaultCenter] postNotificationName:notificationName object:self userInfo:userInfo];
 }
 
 - (void)removeProductsRequestDelegate:(RMProductsRequestDelegate*)delegate
@@ -632,10 +731,9 @@ typedef void (^RMStoreSuccessBlock)();
         [self.store addProduct:product];
     }
     
-    for (NSString *invalid in invalidProductIdentifiers)
-    {
+    [invalidProductIdentifiers enumerateObjectsUsingBlock:^(NSString *invalid, NSUInteger idx, BOOL *stop) {
         RMStoreLog(@"invalid product with id %@", invalid);
-    }
+    }];
     
     if (self.successBlock)
     {
